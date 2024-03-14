@@ -71,6 +71,15 @@ class Paceline:
         self.mean_ht = np.mean([x.ht for x in self.riders])
         
     def calc_power_demands(self,base_array,height_factor,weight_factor,draft_factor):
+        '''given certain scaling factors, calculates the estimated demands for each rider in each position
+        scaling factors include:
+            -base_array array of numbers [1.0,...0.6 ] etc. that provide a "base array" for estimating draft benefit as a function of position
+                - asymp function can be helpful for playing with this
+            -height/weight factors scale the power demands based on some combo of rider height/weight, aiming to roughly approximate the zwift voodo
+            -draft factor scales the base_array even further, giving additional draft benefit to more slippery riders and penalizing the less aero riders.
+            
+            adds a pwr_df (dataframe) to the instance
+        '''
         hf_array = (np.array([x.ht for x in self.riders])/self.mean_ht)**height_factor
         wf_array = (np.array([x.wt for x in self.riders])/self.mean_wt)**weight_factor
         f = hf_array * wf_array #represents "base scaling" based on height/weight --> i.e. best estimate of CdA
@@ -84,13 +93,12 @@ class Paceline:
         self.pwr_df = df       
 
     def build_wodf(self, dur, turn_times):
-        '''translates a "workout" {'Time':[x,y],'Power':[px,py]} into a dataframe given a total estimated duration.
-        workout will repeat itself until duration is used up
-        returns a dataframe
+        '''with power demands calculated, given a total duration and an array of turn times (len = len(self.riders)
+        calculates a "workout_df" for each rider in the paceline        
         '''
         
         for i,r in self.pwr_df.iterrows():
-            #rearrange the power demands based on position
+            #rearrange the power demands based on positioning
             c = r[list(range(0,len(self.pwr_df)))].to_list()
             pa = c[:i+1][::-1]+c[i+1:][::-1]          
             df = pd.DataFrame(data={'Time':turn_times,'Power':pa})
@@ -106,6 +114,7 @@ class Paceline:
             else:
                 r.wo_df = df
 
+#step one --> define riders
 r1 = Rider(name='AL',wt=60,ht=170,ftp=300,wp=25000)
 r2 = Rider(name='GM',wt=64,ht=173,ftp=297,wp=25000)
 r3 = Rider(name='DS',wt=81,ht=188,ftp=335,wp=25000)
@@ -113,27 +122,33 @@ r4 = Rider(name='ER',wt=85,ht=184,ftp=322,wp=25000)
 r5 = Rider(name='JW',wt=78,ht=185,ftp=305,wp=25000)
 r6 = Rider(name='JM',wt=74,ht=171,ftp=260,wp=25000)
 
+#step two, define positions in paceline and scaling factor
 pl = Paceline(riders=[r1,r2,r3,r4,r5,
                         r6
                       ]
               ,scaling_factor=1.28)
 print('Mean Power at Front:')
 print(pl.target_power)
+
+#step three, estimate power demands in the paceline
 barray = asymp_func(x=np.arange(0,len(pl.riders),1),x0=0,y0=1.0,x1=4,y1=0.62)
-#
-print('Draft Fractions by Position:')
+#print('Draft Fractions by Position:')
 print(barray)
 pl.calc_power_demands(base_array=barray
                      ,height_factor=0.2 #higher the number, the more penalty being tall is
                      ,weight_factor=0.15 #higher then number, the more penalty being heavy is
                      ,draft_factor=0.9 #the higher the number, the more draft advantage is given to smaller riders 
                      )
-pl.build_wodf(dur=45*60,
-              turn_times=[90,60,60,45,45,5]
-              )
+
 print('Power Demands')
 print(pl.pwr_df)
 
+#step four, define turn times in the paceline and estimate duration to create a "workout_dataframe" for each rider
+pl.build_wodf(dur=45*60,
+              turn_times=[90,60,60,45,45,5]
+              )
+
+#step 5, now that each rider has a "workout" based on the power demands from the paceline, calculate wbal over the duration of the event
 fig, ax = plt.subplots()
 for r in pl.riders:
     r.calc_wbal()
@@ -143,7 +158,7 @@ ax.set_ylabel('Wbal')
 ax.set_xlabel('Duration (min)')
 ax.set_ylim(0,30000)
 plt.grid()
-#%%
+#%% printout of pull plan
 pp_df = pl.pwr_df[['rider',0]].rename(columns={0:'Power (w)'})
 pp_df['Turn (s)'] = [90,60,60,45,45,5]
 
