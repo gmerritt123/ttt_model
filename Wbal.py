@@ -15,27 +15,25 @@ import matplotlib.pyplot as plt
 
 
 #%%
-def power_speed(v,cd,a,wc,wb,g,vhw=0,rho=1.1995,crr=0.004,lossdt=2):
+def power_speed(v,cd,a,wc,wb,g,vhw=0,rho=1.22601,crr=0.004,lossdt=2,draft_factor=1):
     '''
     power given speed
     v = speed (m/s)
     cd = drag coefficient, cadex with disc is 0.7185 --> https://zwifterbikes.web.app/whatif
     a = frontal area
-    rho = air density (1.1995 kg/m3 --> https://gribble.org/cycling/air_density.html)
+    rho = air density (1.22601 kg/m3 --> https://gribble.org/cycling/air_density.html)
     vhw = headwind velocity (m/s)
     wc = weight cyclist (kg)
     wb = weight bike (kg) --> cadex w disc is 9.221 kg --> https://zwifterbikes.web.app/whatif
     g = grade (rise/run*100)
     crr = rolling resistance coefficient (0.004 on pavement --> https://zwiftinsider.com/crr/)
     lossdt = drivertrain losses (/100)
+    draft_factor = reduction in the "aero term" component of the equation due to drafting
     '''
     dtl_term = (1-lossdt/100)**-1
-    w = wc+wb
+    w = wc+wb+2.5 #2.5 kg "weight of kit"  -->https://zwifterbikes.web.app/howitworks
     g_term = 9.8067 * w * (np.sin(np.arctan(g/100))+crr*np.cos(np.arctan(g/100)))
-    print(g_term)
-    a_term = 0.5*cd*a*rho*(v+vhw)**2
-    print(a_term)
-    
+    a_term = 0.5*cd*a*rho*(v+vhw)**2*draft_factor
     return dtl_term * (g_term + a_term)*v
 
 
@@ -44,7 +42,7 @@ def frontal_area(height,weight):
     height in m
     weight in kg
     '''
-    return 0.0293*height**0.725*weight**0.425
+    return 0.0293*height**0.725*weight**0.425+ 0.0604
 
 
 def asymp_func(x,x0,y0,x1,y1):
@@ -68,6 +66,8 @@ class Rider:
     ht: float
     ftp: float
     wp: float
+    cd: float #drag coefficient of their bike
+    wb: float #weight of their bike
     
     def __post_init__(self):
         self.frontal_area = frontal_area(self.ht/100,self.wt)
@@ -99,32 +99,48 @@ class Rider:
 @dataclass
 class Paceline:
     riders: list
-    scaling_factor: float
+    target_speed: float
+    grade: float
+    crr: float   
     
     def __post_init__(self):
-        assert all([isinstance(x,Rider) for x in self.riders])
-        self.mean_ftp = np.mean([x.ftp for x in self.riders])
-        self.target_power = self.mean_ftp*self.scaling_factor
-        self.mean_wt = np.mean([x.wt for x in self.riders])
-        self.mean_ht = np.mean([x.ht for x in self.riders])
+        assert all([isinstance(x,Rider) for x in self.riders])            
+        for r in self.riders:
+            tp = power_speed(v=self.target_speed/3.6 #to m/s
+                             , cd=r.cd
+                             , a=r.frontal_area
+                             , wc=r.wt
+                             , wb=r.wb
+                             , g=self.grade
+                             )
+            r.target_power = tp
+
         
-    def calc_power_demands(self,base_array,height_factor,weight_factor,draft_factor):
+        
+        
+    def calc_power_demands(self,base_array):
         '''given certain scaling factors, calculates the estimated demands for each rider in each position
         scaling factors include:
             -base_array array of numbers [1.0,...0.6 ] etc. that provide a "base array" for estimating draft benefit as a function of position
                 - asymp function can be helpful for playing with this
             -height/weight factors scale the power demands based on some combo of rider height/weight, aiming to roughly approximate the zwift voodo
             -draft factor scales the base_array even further, giving additional draft benefit to more slippery riders and penalizing the less aero riders.
-            
             adds a pwr_df (dataframe) to the instance
         '''
-        hf_array = (np.array([x.ht for x in self.riders])/self.mean_ht)**height_factor
-        wf_array = (np.array([x.wt for x in self.riders])/self.mean_wt)**weight_factor
-        f = hf_array * wf_array #represents "base scaling" based on height/weight --> i.e. best estimate of CdA
+
         for i,r in enumerate(self.riders):
-            df = (f[i]*base_array)**draft_factor #additional scaling on each draft position based on CdA for that rider
-            p = f[i]*self.target_power*df
-            r.power_array = p
+            parr = []
+            for b in base_array:
+                p = power_speed(v=self.target_speed/3.6 #to m/s
+                                 , cd=r.cd
+                                 , a=r.frontal_area
+                                 , wc=r.wt
+                                 , wb=r.wb
+                                 , g=self.grade
+                                 ,draft_factor=b
+                                 )
+                parr.append(p)
+            r.power_array = parr    
         df = pd.DataFrame(index=[x.name for x in pl.riders]
                           ,data=np.array([x.power_array for x in pl.riders])
                           ,columns=[i for i in range(len(pl.riders))]).round(0).reset_index().rename(columns={'index':'rider'})
@@ -151,48 +167,52 @@ class Paceline:
             else:
                 r.wo_df = df
 
-#step one --> define riders
-r1 = Rider(name='AL',wt=60,ht=170,ftp=295,wp=20000)
-r2 = Rider(name='GM',wt=64,ht=173,ftp=305,wp=20000)
-r3 = Rider(name='DS',wt=83,ht=188,ftp=350,wp=20000)
-# r3 = Rider(name='ER',wt=81,ht=184,ftp=330,wp=20000)
-r4 = Rider(name='SG',wt=67,ht=179,ftp=290,wp=20000)
-r5 = Rider(name='EK',wt=76,ht=183,ftp=315,wp=20000)
-r6 = Rider(name='TR',wt=75,ht=180,ftp=335,wp=20000)
 
-#%%
-# r6 = Rider(name='DK',wt=76,ht=178,ftp=305,wp=20000)
-# r7 = Rider(name='JW',wt=78,ht=185,ftp=305,wp=20000)
-# r8 = Rider(name='LN',wt=77,ht=182,ftp=309,wp=20000)
-# r9 = Rider(name='MB',wt=77.4,ht=180,ftp=301,wp=20000)
+#step one --> define riders, cd and wb are from zwifter bikes for cadex disc
+r1 = Rider(name='AL',wt=60,ht=170,ftp=295,wp=20000,cd=0.7185,wb=9.221)
+r2 = Rider(name='GM',wt=64,ht=173,ftp=305,wp=20000,cd=0.7185,wb=9.221)
+r3 = Rider(name='DS',wt=83,ht=188,ftp=350,wp=20000,cd=0.7185,wb=9.221)
+
+r4 = Rider(name='SG',wt=67,ht=179,ftp=290,wp=20000,cd=0.7185,wb=9.221)
+r5 = Rider(name='EK',wt=76,ht=183,ftp=315,wp=20000,cd=0.7185,wb=9.221)
+r6 = Rider(name='TR',wt=75,ht=180,ftp=335,wp=20000,cd=0.7185,wb=9.221)
+
+
+
+# r1 = Rider(name='ER',wt=81,ht=184,ftp=330,wp=20000,cd=0.7185,wb=9.221)
+# r2 = Rider(name='DK',wt=76,ht=178,ftp=322,wp=20000,cd=0.7185,wb=9.221)
+# r3 = Rider(name='SB',wt=67,ht=179,ftp=290,wp=20000,cd=0.7185,wb=9.221)
+# r4 = Rider(name='LN',wt=77,ht=182,ftp=329,wp=20000,cd=0.7185,wb=9.221)
+# r5 = Rider(name='JW',wt=78,ht=185,ftp=311,wp=20000,cd=0.7185,wb=9.221)
 
 # r7 = Rider(name='JM',wt=74,ht=171,ftp=265,wp=20000)
 # r8 = Rider(name='SP',wt=88.9,ht=179,ftp=287,wp=20000)
 # r8 = Rider(name='SB',wt=67,ht=179,ftp=275,wp=20000)
+# r9 = Rider(name='MB',wt=77.4,ht=180,ftp=301,wp=20000)
 
 #step two, define positions in paceline and scaling factor
-pl = Paceline(riders=[r3,r1,r2,r6,r5,r4
+pl = Paceline(riders=[r1,r3,r2,r6,r5,r4
                       ]
-              ,scaling_factor=1.25)
-print('Mean Power at Front:')
-print(pl.target_power)
+              ,target_speed=47.7
+              ,grade = 0, crr= 0.004)
+
+# pl = Paceline(riders=[r1,r2,r3,r4,r5
+#                       ]
+#               ,target_speed=46.5
+#               ,grade = 0, crr= 0.004)
+
+for r in pl.riders:
+    print(r)
+    print(r.target_power)
 
 #step three, estimate power demands in the paceline
 barray = asymp_func(x=np.arange(0,len(pl.riders),1),x0=0,y0=1.0,x1=4,y1=0.62)
 #print('Draft Fractions by Position:')
-pl.calc_power_demands(base_array=barray
-                      ,height_factor=0.25 #higher the number, the more penalty being tall is
-                      ,weight_factor=0.2 #higher then number, the more penalty being heavy is
-                      ,draft_factor=0.9 #the higher the number, the more draft advantage is given to smaller riders 
-                      )
-# pl.calc_power_demands(base_array=barray
-#                      ,height_factor=0.506 #higher the number, the more penalty being tall is
-#                      ,weight_factor=0.271 #higher then number, the more penalty being heavy is
-#                      ,draft_factor=0.7998 #the higher the number, the more draft advantage is given to smaller riders 
-#                      )
+pl.calc_power_demands(base_array=barray)
 
 
-turn_times = [45,45,45,45,30,30]
+turn_times = [60,45,45,45,30,30]
+# turn_times = [30,30,30,30,30]
 #step four, define turn times in the paceline and estimate duration to create a "workout_dataframe" for each rider
 pl.build_wodf(dur=38*60,
               turn_times=turn_times
@@ -219,53 +239,13 @@ pp_df
 # (pp_df['Turn (s)'].sum()+45+30+30)*47000/60/60
 
  #%%           
-#"calibration" of height,weight and draft factors + base array
-# needs to be cleaned up/more formalized but rough idea for now
-# populate observations from riders e.g "in p3 i was averaging x today"
-
-def calcRes(a):         
-    r1 = Rider(name='GM',wt=64,ht=173,ftp=297,wp=25000)
-    r2 = Rider(name='ER',wt=81,ht=184,ftp=330,wp=25000)
-    r3 = Rider(name='SG',wt=68.2,ht=177,ftp=320,wp=25000)
-    r4 = Rider(name='EK',wt=76,ht=183,ftp=306,wp=25000)
-    r5 = Rider(name='DK',wt=76,ht=178,ftp=302,wp=25000)
-    r6 = Rider(name='JW',wt=78,ht=185,ftp=294,wp=25000)
-    r7 = Rider(name='MB',wt=77.4,ht=175,ftp=301,wp=25000)
-    r8 = Rider(name='SP',wt=88.9,ht=179,ftp=287,wp=25000)
-    
-    pl = Paceline(riders=[r1,r2,r3,r4,r5,r6,r7,r8]
-                  ,scaling_factor=1.25)
-    
-    height_factor = a[0]
-    weight_factor = a[1]
-    draft_factor = a[2]
-    pl.calc_power_demands(base_array=asymp_func(x=np.arange(0,7,1),x0=0,y0=1.0,x1=4,y1=0.62)
-                          ,height_factor=height_factor,weight_factor=weight_factor,draft_factor=draft_factor)
-    #observations
-    o1 = (r2.power_array[1] - 340)**2
-    o2 = (r2.power_array[2] - 308)**2
-    o3 = (r2.power_array[3] - 286)**2
-    o4 = (r3.power_array[1] - 301)**2
-    o5 = (r3.power_array[2] - 271)**2
-    o6 = (r3.power_array[3] - 253)**2
-    o7 = (r4.power_array[1] - 326)**2
-    o8 = (r4.power_array[2] - 294)**2
-    o9 = (r4.power_array[3] - 274)**2
-    o10 = (r1.power_array[1] - 286)**2
-    o11 = (r1.power_array[2] - 258)**2
-    o12 = (r1.power_array[3] - 241)**2
-
-    return np.sum([o1,o2,o3,o4,o5,o6,o8,o9,o10,o11,o12])
-
-# r = calcRes(height_factor=1.05,weight_factor=0.1,draft_factor=0.75)
-
-from scipy.optimize import minimize
-
-ie = [0.2,0.3,0.75]
-res = minimize(calcRes,x0=ie)
-print(res.x)
-#^^
-
+pl = Paceline(riders=[r2,r3,r6,r5,r4,r1
+                      ]
+              ,target_speed=33
+              ,grade = 3.1, crr= 0.004)
+for r in pl.riders:
+    print(r)
+    print(r.target_power)
 
     
     
